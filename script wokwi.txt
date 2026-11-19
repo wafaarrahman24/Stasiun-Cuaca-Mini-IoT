@@ -1,0 +1,108 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+const char* WIFI_SSID   = "Wokwi-GUEST";
+const char* WIFI_PASS   = "";
+const char* MQTT_BROKER = "broker.hivemq.com";
+const int   MQTT_PORT   = 1883;
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// --- KONFIGURASI SKENARIO (S5: MQTT QoS 1, 20 Byte) ---
+String skenario = "S5"; 
+int payload_size = 20; 
+const int TARGET_PESAN = 100;
+const unsigned long JEDA_KIRIM_MS = 2000; // 2 detik
+
+String topik = "josjis/eksperimen/qos1"; // Topik publish & subscribe
+int seq = 0;
+unsigned long kirimTerakhir = 0;
+unsigned long t_kirim_ms = 0;
+bool menungguBalasan = false;
+unsigned long timeoutBatas = 5000; // Batas hilang 5 detik sesuai template
+
+// Membuat payload dummy sepanjang X byte
+String buatPayload(int panjang) {
+  String p = "";
+  for(int i = 0; i < panjang; i++) {
+    p += "X";
+  }
+  return p;
+}
+
+String payloadData;
+
+void pesanMasuk(char* topic, byte* payload, unsigned int panjang) {
+  if (menungguBalasan) {
+    unsigned long t_terima_ms = millis();
+    unsigned long rtt_ms = t_terima_ms - t_kirim_ms;
+    int rssi = WiFi.RSSI(); // Wokwi akan otomatis memberi angka statis
+    
+    // Cetak format baku CSV
+    Serial.print(skenario); Serial.print(",");
+    Serial.print(seq); Serial.print(",");
+    Serial.print(payload_size); Serial.print(",");
+    Serial.print(t_kirim_ms); Serial.print(",");
+    Serial.print(t_terima_ms); Serial.print(",");
+    Serial.print(rtt_ms); Serial.print(",");
+    Serial.print("Berhasil,");
+    Serial.println(rssi);
+    
+    menungguBalasan = false;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Header persis seperti template soal
+  Serial.println("skenario,seq,payload_byte,t_kirim_ms,t_terima_ms,rtt_ms,status,rssi_dbm");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASS, 6);
+  while (WiFi.status() != WL_CONNECTED) { delay(250); }
+
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setCallback(pesanMasuk);
+  
+  // Memperbesar buffer agar data tidak terpotong
+  mqtt.setBufferSize(1024);
+  
+  // Buat isi pesan sesuai ukuran (20 byte)
+  payloadData = buatPayload(payload_size);
+}
+
+void loop() {
+  if (!mqtt.connected()) {
+    if (mqtt.connect("esp32-josjis-eksperimen-qos1")) {
+      // MENGAKTIFKAN QOS 1 PADA SUBSCRIBE
+      mqtt.subscribe(topik.c_str(), 1); 
+    }
+    return;
+  }
+  mqtt.loop();
+
+  // Jika pesan tidak kembali dalam 5 detik, catat sebagai 'Hilang'
+  if (menungguBalasan && (millis() - t_kirim_ms > timeoutBatas)) {
+    int rssi = WiFi.RSSI();
+    Serial.print(skenario); Serial.print(",");
+    Serial.print(seq); Serial.print(",");
+    Serial.print(payload_size); Serial.print(",");
+    Serial.print(t_kirim_ms); Serial.print(",");
+    Serial.print(","); // Waktu terima kosong
+    Serial.print(","); // RTT kosong
+    Serial.print("Hilang,");
+    Serial.println(rssi);
+    menungguBalasan = false;
+  }
+
+  // Kirim pesan setiap 2 detik
+  if (seq < TARGET_PESAN && !menungguBalasan && (millis() - kirimTerakhir >= JEDA_KIRIM_MS)) {
+    seq++;
+    t_kirim_ms = millis();
+    kirimTerakhir = t_kirim_ms;
+    menungguBalasan = true;
+    
+    mqtt.publish(topik.c_str(), payloadData.c_str());
+  }
+}
